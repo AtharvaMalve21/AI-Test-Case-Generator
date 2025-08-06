@@ -1,0 +1,210 @@
+const axios = require("axios");
+const dotenv = require("dotenv");
+dotenv.config();
+
+const GITHUB_API = process.env.GITHUB_API;
+
+const getLanguage = (filename) => {
+  const ext = filename.split(".").pop().toLowerCase();
+  const langMap = {
+    js: "javascript",
+    jsx: "javascript",
+    ts: "typescript",
+    tsx: "typescript",
+    py: "python",
+    java: "java",
+    cpp: "cpp",
+    c: "c",
+    go: "go",
+    rb: "ruby",
+    php: "php",
+    cs: "csharp",
+    swift: "swift",
+  };
+  return langMap[ext] || "text";
+};
+
+exports.connect = async (req, res) => {
+  try {
+    const { token, repoUrl } = req.body;
+
+    if (!token || !repoUrl) {
+      return res
+        .status(400)
+        .json({ error: "Token and repository URL are required" });
+    }
+
+    const [owner, repo] = repoUrl.split("/");
+
+    // Get repository contents
+    const response = await axios.get(
+      `${GITHUB_API}/repos/${owner}/${repo}/contents`,
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+        params: { recursive: 1 },
+      }
+    );
+
+    // Filter only code files
+    const codeExtensions = [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".py",
+      ".java",
+      ".cpp",
+      ".c",
+      ".go",
+      ".rb",
+      ".php",
+      ".cs",
+      ".swift",
+    ];
+    const files = response.data
+      .filter(
+        (item) =>
+          item.type === "file" &&
+          codeExtensions.some((ext) => item.name.endsWith(ext))
+      )
+      .map((file) => ({
+        path: file.path,
+        name: file.name,
+        type: file.type,
+        language: getLanguage(file.name),
+        download_url: file.download_url,
+        sha: file.sha,
+      }));
+
+    res.json({ files, repository: { owner, repo } });
+  } catch (error) {
+    console.error("GitHub API Error:", error.response?.data || error.message);
+    res.status(500).json({
+      error: "Failed to connect to GitHub",
+      details: error.response?.data?.message || error.message,
+    });
+  }
+};
+
+exports.content = async (req, res) => {
+  try {
+    const { token, files } = req.body;
+
+    const fileContents = await Promise.all(
+      files.map(async (file) => {
+        try {
+          const response = await axios.get(file.download_url, {
+            headers: { Authorization: `token ${token}` },
+          });
+
+          return {
+            path: file.path,
+            content: response.data,
+            language: file.language,
+          };
+        } catch (error) {
+          console.error(`Error fetching ${file.path}:`, error.message);
+          return null;
+        }
+      })
+    );
+
+    const validContents = fileContents.filter((content) => content !== null);
+    res.json({ fileContents: validContents });
+  } catch (error) {
+    console.error("Error fetching file contents:", error.message);
+    res.status(500).json({ error: "Failed to fetch file contents" });
+  }
+};
+
+exports.createPr = async (req, res) => {
+  try {
+    const { token, owner, repo, testCode, fileName, summary } = req.body;
+
+    // Create a new branch
+    const branchName = `test-cases-${Date.now()}`;
+
+    // Get the main branch reference
+    const mainBranch = await axios.get(
+      `${GITHUB_API}/repos/${owner}/${repo}/git/ref/heads/main`,
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    // Create new branch
+    await axios.post(
+      `${GITHUB_API}/repos/${owner}/${repo}/git/refs`,
+      {
+        ref: `refs/heads/${branchName}`,
+        sha: mainBranch.data.object.sha,
+      },
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    // Create the test file
+    const testFileName =
+      fileName ||
+      `tests/${summary.title.replace(/\s+/g, "-").toLowerCase()}.test.js`;
+
+    await axios.put(
+      `${GITHUB_API}/repos/${owner}/${repo}/contents/${testFileName}`,
+      {
+        message: `Add automated tests: ${summary.title}`,
+        content: Buffer.from(testCode).toString("base64"),
+        branch: branchName,
+      },
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    // Create Pull Request
+    const prResponse = await axios.post(
+      `${GITHUB_API}/repos/${owner}/${repo}/pulls`,
+      {
+        title: `🧪 Add automated tests: ${summary.title}`,
+        head: branchName,
+        base: "main",
+        body: `## Test Case Generation\n\n**Description:** ${
+          summary.description
+        }\n\n**Framework:** ${
+          summary.framework
+        }\n\n**Coverage:**\n${summary.coverage
+          .map((c) => `- ${c}`)
+          .join("\n")}\n\n---\n*Generated by AI Test Case Generator*`,
+      },
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
+    );
+
+    res.json({
+      pullRequest: prResponse.data,
+      message: "Pull request created successfully!",
+    });
+  } catch (error) {
+    console.error("PR Creation Error:", error.response?.data || error.message);
+    res.status(500).json({
+      error: "Failed to create pull request",
+      details: error.response?.data?.message || error.message,
+    });
+  }
+};
