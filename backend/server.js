@@ -18,7 +18,7 @@ app.use(
 app.use(express.json());
 
 app.use("/api/github", githubRoutes);
-app.use("/api", apiRoutes);
+app.use("/api/ai", apiRoutes);
 
 app.get("/", (req, res) => {
   res.json({ message: `Test Case Generator API running on port ${PORT}` });
